@@ -10,6 +10,7 @@ The `execute()` function uses a `ThreadPoolExecutor` with `num_parallel_invocati
 If the number of scenarios exceeds the number of worker threads, the shuffled scenarios are queued and processed in order as threads become available.
 Each scenario assigned to a worker thread is handled by the `process_scenario()` function, which performs `invocations_per_scenario` API invocations.
 Thus, each worker thread processes one scenario at a time, invoking the Bedrock ConverseStream API by `invocations_per_scenario` times for a given scenario.
+Each worker thread consecutively invoke the ConverseStream API for the same scenario until all `invocations_per_scenario` invocations are completed.
 As a result, each run invokes the ConverseStream API a total of
 `invocations_per_scenario * len(randomized_scenario_list)` times.
 Therefore, the total number of ConverseStream API invocations in an experiment is:
@@ -90,21 +91,33 @@ def invoke_api(bedrock, file_path,
     body, inference_config = get_body(model_id, file_path, prompt, max_tokens)
     output_token_size, input_token_size = None, None
 
+    # print("performance_config: ", performance_config)
     # print("inference_config: ", inference_config)
     # import sys
     # sys.exit(0)
 
+    
     while True:
         try:
             start_time = time.time()
-            response = bedrock.converse_stream(
-                messages=body,
-                modelId=model_id,  # TODO: This is in fact inferenceProfileId.
-                inferenceConfig=inference_config,
-                performanceConfig={
-                    'latency': performance_config
-                }
-            )
+            # Some models for some regions require performanceConfig to be specified. 
+            # Other models cannot accept performanceConfig. 
+            if performance_config is not None:
+                response = bedrock.converse_stream(
+                    messages=body,
+                    modelId=model_id,  # TODO: This is in fact inferenceProfileId.
+                    inferenceConfig=inference_config,
+                    performanceConfig={
+                        'latency': performance_config
+                    }
+                )
+            else:
+                response = bedrock.converse_stream(
+                    messages=body,
+                    modelId=model_id,
+                    inferenceConfig=inference_config
+                )
+
             first_byte_time = None
             event_stream = response.get('stream')
             for event in event_stream:
@@ -149,6 +162,7 @@ def execute(scenarios_list, scenario_config, num_parallel_invocations=4, early_b
         prompt = scenario['prompt']
         # TODO: Non-existent key
         performance_config = scenario['performance_config']
+        print("execute.performance_config: ", performance_config)
         # performance_config=None
         # performance_config=scenario['performance_config'] # TODO: Putting PerformanceConfig value from performance_config.
 
@@ -274,7 +288,7 @@ if __name__ == "__main__":
             model_id = file.get('model_id')
             region = file.get('region')
             performance_config = file.get(
-                'performance_config', 'standard')  # This is where
+                'performance_config', None)  # This is where
             out_tokens = file.get('expected_output_tokens', 100)
             scenario_list.append({
                 "file_path": scenario_config_file,
@@ -293,9 +307,15 @@ if __name__ == "__main__":
 
         with logging_lock:
             logging.info(
-                f"{len(randomized_scenario_list)} scenarios x {experiment_config['invocations_per_scenario']} invocations = {len(randomized_scenario_list) * experiment_config['invocations_per_scenario']} total invocations")
+                f"{len(randomized_scenario_list)} scenarios x {experiment_config['invocations_per_scenario']} invocations = "
+                f"{len(randomized_scenario_list) * experiment_config['invocations_per_scenario']} total invocations"
+            )
             logging.info(
-                f"Running {run_count}-th run of {num_runs_per_experiment} runs")
+                f"Running {run_count}-th run of {num_runs_per_experiment} runs"
+            )
+            logging.info(
+                f"Completed {run_count}-th run of {num_runs_per_experiment} runs"
+            )
 
         run_result = execute(
             randomized_scenario_list,
